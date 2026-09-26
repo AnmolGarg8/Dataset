@@ -8,6 +8,7 @@ folding) is done through pandas ``.str`` accessors which call C under
 the hood.
 """
 
+import logging
 import re
 import unicodedata
 from typing import Dict, List, Set
@@ -15,6 +16,52 @@ from typing import Dict, List, Set
 import pandas as pd
 
 from .config import CFG
+
+logger = logging.getLogger(__name__)
+
+# ── Indic Script Transliteration ─────────────────────────────────────────
+try:
+    from indic_transliteration import sanscript
+    from indic_transliteration.sanscript import transliterate
+    _HAS_INDIC = True
+except ImportError:
+    _HAS_INDIC = False
+
+_ANY_INDIC = re.compile(r"[\u0900-\u0D7F]")
+
+_INDIC_RANGES = [
+    (re.compile(r"[\u0900-\u097F]"), getattr(sanscript, "DEVANAGARI", None) if _HAS_INDIC else None),
+    (re.compile(r"[\u0A80-\u0AFF]"), getattr(sanscript, "GUJARATI", None) if _HAS_INDIC else None),
+    (re.compile(r"[\u0980-\u09FF]"), getattr(sanscript, "BENGALI", None) if _HAS_INDIC else None),
+    (re.compile(r"[\u0C80-\u0CFF]"), getattr(sanscript, "KANNADA", None) if _HAS_INDIC else None),
+    (re.compile(r"[\u0B80-\u0BFF]"), getattr(sanscript, "TAMIL", None) if _HAS_INDIC else None),
+    (re.compile(r"[\u0C00-\u0C7F]"), getattr(sanscript, "TELUGU", None) if _HAS_INDIC else None),
+    (re.compile(r"[\u0D00-\u0D7F]"), getattr(sanscript, "MALAYALAM", None) if _HAS_INDIC else None),
+    (re.compile(r"[\u0A00-\u0A7F]"), getattr(sanscript, "GURMUKHI", None) if _HAS_INDIC else None),
+    (re.compile(r"[\u0B00-\u0B7F]"), getattr(sanscript, "ORIYA", None) if _HAS_INDIC else None),
+]
+
+_DEVA_SUBS = {
+    "\u0949": "o", "\u094a": "o", "\u0945": "e",
+    "\u0911": "O", "\u090d": "E", "\u093c": "", "\u0950": "om "
+}
+
+
+def _transliterate_indic_text(text: str) -> str:
+    """Convert Indic scripts (Devanagari, Gujarati, Bengali, etc.) to Latin phonetic text."""
+    if not text or not _HAS_INDIC or not isinstance(text, str):
+        return text
+    if _ANY_INDIC.search(text):
+        for k, v in _DEVA_SUBS.items():
+            if k in text:
+                text = text.replace(k, v)
+        for pattern, scheme in _INDIC_RANGES:
+            if scheme is not None and pattern.search(text):
+                try:
+                    text = transliterate(text, scheme, sanscript.ITRANS)
+                except Exception:
+                    pass
+    return text
 
 
 # ── Scalar helpers (used in .apply only where vectorised is impossible) ──
@@ -44,6 +91,7 @@ _RE_MULTI_SPACE  = re.compile(r"\s+")
 # Multi-word legal suffixes checked first, then single-word
 _MULTI_SUFFIXES = [
     "private limited", "pvt ltd", "pvt limited", "private ltd",
+    "praiveta limiteda", "praiveta ltd", "pvt limiteda",
 ]
 _SINGLE_SUFFIX_SET: Set[str] = set()  # filled at import time
 
@@ -51,6 +99,8 @@ _SINGLE_SUFFIX_SET: Set[str] = set()  # filled at import time
 def _init_suffix_set():
     global _SINGLE_SUFFIX_SET
     _SINGLE_SUFFIX_SET = {s.lower() for s in CFG.legal_suffixes}
+    # Add common Hindi/Indic transliterated legal suffixes
+    _SINGLE_SUFFIX_SET.update({"limiteda", "kampani", "stora", "elaelapi"})
 
 _init_suffix_set()
 
@@ -87,7 +137,8 @@ def preprocess_dataframe(
 ) -> pd.DataFrame:
     """Add cleaned columns to *df* using vectorised string ops.
 
-    Adds:  name_clean, addr_clean, name_tokens, addr_tokens, addr_numbers.
+    Adds:  name_clean, addr_clean, name_tokens, addr_tokens, addr_numbers,
+           name_script_dropped, addr_script_dropped.
 
     Works on DataFrames with columns: entity_id, business_name,
     business_address, country.  NaN values are handled gracefully.
@@ -98,25 +149,43 @@ def preprocess_dataframe(
     out["business_name"]    = out["business_name"].fillna("")
     out["business_address"] = out["business_address"].fillna("")
 
-    # ── name_clean  (vectorised pipeline) ─────────────────────────
-    s = out["business_name"].str.lower()
-    # Accent folding (the only step that needs per-row Python)
+    # ── Transliterate Indic scripts BEFORE ascii normalization ────
+    s_raw = out["business_name"]
+    if out["business_name"].str.contains(_ANY_INDIC, regex=True).any():
+        s = out["business_name"].apply(_transliterate_indic_text)
+    else:
+        s = out["business_name"]
+
+    a_raw = out["business_address"]
+    if out["business_address"].str.contains(_ANY_INDIC, regex=True).any():
+        a = out["business_address"].apply(_transliterate_indic_text)
+    else:
+        a = out["business_address"]
+
+    # ── name_clean (vectorised pipeline) ─────────────────────────
+    s = s.str.lower()
     s = s.apply(_fold_accents)
     s = s.str.replace("&", " and ", regex=False)
     s = s.str.replace(_RE_NON_ALPHANUM, " ", regex=True)
     s = s.str.replace(_RE_MULTI_SPACE, " ", regex=True).str.strip()
-    # Strip legal suffixes (fast scalar, but applied via vectorised .apply)
     out["name_clean"] = s.apply(_strip_suffix_scalar)
 
-    # ── addr_clean  (vectorised pipeline) ─────────────────────────
-    a = out["business_address"].str.lower()
+    # ── Diagnostic: name_script_dropped ───────────────────────────
+    out["name_script_dropped"] = (out["name_clean"] == "") & (s_raw.str.strip() != "")
+    dropped_count = int(out["name_script_dropped"].sum())
+    if dropped_count > 0:
+        logger.info(
+            f"Diagnostic: {dropped_count:,} / {len(out):,} records ({dropped_count/len(out)*100:.2f}%) "
+            f"had name dropped by normalization (name_script_dropped=True)"
+        )
+
+    # ── addr_clean (vectorised pipeline) ─────────────────────────
+    a = a.str.lower()
     a = a.apply(_fold_accents)
     a = a.str.replace("&", " and ", regex=False)
     a = a.str.replace(_RE_NON_ALPHANUM, " ", regex=True)
     a = a.str.replace(_RE_MULTI_SPACE, " ", regex=True).str.strip()
-    # Expand abbreviations — build a regex from the dict
     if abbrevs:
-        # Sort by length descending so longer abbrevs match first
         sorted_abbrevs = sorted(abbrevs.items(), key=lambda x: len(x[0]), reverse=True)
         for short, full in sorted_abbrevs:
             a = a.str.replace(
@@ -124,7 +193,9 @@ def preprocess_dataframe(
             )
     out["addr_clean"] = a
 
-    # ── Tokens (scalar .apply — but fast since strings are already clean)
+    out["addr_script_dropped"] = (out["addr_clean"] == "") & (a_raw.str.strip() != "")
+
+    # ── Tokens (scalar .apply — fast since strings are already clean)
     out["name_tokens"]  = out["name_clean"].apply(
         lambda x: _get_tokens_scalar(x, CFG.min_token_len)
     )
@@ -143,6 +214,7 @@ def preprocess_dataframe(
 def normalize_text(text: str) -> str:
     if pd.isna(text) or not isinstance(text, str):
         return ""
+    text = _transliterate_indic_text(text)
     text = text.lower()
     text = _fold_accents(text)
     text = text.replace("&", " and ")

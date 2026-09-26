@@ -93,6 +93,8 @@ FEATURE_NAMES = [
     # Cross & Meta features
     "name_in_addr",
     "country_match",
+    # Script / Normalization Fallback
+    "name_dropped_by_normalization",
 ]
 
 NUM_FEATURES = len(FEATURE_NAMES)
@@ -113,6 +115,8 @@ def compute_pair_features(
     cand_addr_tokens: list,
     cand_addr_numbers: set,
     cand_country: str,
+    s1_name_dropped: bool = False,
+    cand_name_dropped: bool = False,
 ) -> np.ndarray:
     """Compute feature vector for a single (S1, candidate) pair.
 
@@ -196,6 +200,9 @@ def compute_pair_features(
 
     feats[23] = 1.0 if s1_country == cand_country else 0.0
 
+    # ── Script / Normalization Fallback ────────────────────────
+    feats[24] = 1.0 if (s1_name_dropped or cand_name_dropped) else 0.0
+
     return feats
 
 
@@ -208,7 +215,7 @@ def extract_features_batch(
 
     Args:
         s1_records: {entity_id: {name_clean, addr_clean, name_tokens,
-                     addr_tokens, addr_numbers, country}}
+                     addr_tokens, addr_numbers, country, name_script_dropped}}
         pool_records: same structure for S2+S3 records.
         candidate_pairs: {s1_id: set(candidate_ids)}
 
@@ -247,6 +254,8 @@ def extract_features_batch(
                 cand_addr_tokens=cand.get("addr_tokens", []),
                 cand_addr_numbers=cand.get("addr_numbers", set()),
                 cand_country=cand.get("country", ""),
+                s1_name_dropped=s1.get("name_script_dropped", False),
+                cand_name_dropped=cand.get("name_script_dropped", False),
             )
             pair_ids.append((s1_id, cand_id))
             features_list.append(feats)
@@ -268,7 +277,7 @@ def df_to_record_dict(df: pd.DataFrame) -> Dict[str, dict]:
     """Convert preprocessed DataFrame to a dict-of-dicts for fast lookup.
 
     Expected columns: entity_id, name_clean, addr_clean, name_tokens,
-    addr_tokens, addr_numbers, country.
+    addr_tokens, addr_numbers, country, name_script_dropped.
     """
     records = {}
     for _, row in df.iterrows():
@@ -279,5 +288,6 @@ def df_to_record_dict(df: pd.DataFrame) -> Dict[str, dict]:
             "addr_tokens": row.get("addr_tokens", []),
             "addr_numbers": row.get("addr_numbers", set()),
             "country": row.get("country", ""),
+            "name_script_dropped": bool(row.get("name_script_dropped", False)),
         }
     return records

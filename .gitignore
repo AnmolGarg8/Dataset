@@ -1,4 +1,4 @@
-# ── Raw dataset input files (too large for GitHub, download from competition portal) ──
+# ── Raw dataset input files (too large for GitHub, 300MB-1GB each) ──
 dataset/train/train_source1.tsv
 dataset/train/train_source2.tsv
 dataset/train/train_source3.tsv
@@ -6,6 +6,15 @@ dataset/train/train_ground_truth.tsv
 dataset/test/test_source1.tsv
 dataset/test/test_source2.tsv
 dataset/test/test_source3.tsv
+
+# ── Output files too large for GitHub (>100MB limit) ──
+# candidate_pairs.tsv is 610 MB — your friend can regenerate it by running predict.py
+output/candidate_pairs.tsv
+# Duplicate model artifact (same file exists in code/business_entity_resolution/output/)
+output/model.joblib
+
+# ── Submission zip (>100MB GitHub limit) ──
+EntityResolvers_submission.zip
 
 # ── Python cache ──
 __pycache__/

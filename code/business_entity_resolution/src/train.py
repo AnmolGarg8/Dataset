@@ -173,20 +173,28 @@ def main():
     # ── 11. Quick validation evaluation ───────────────────────────
     logger.info("Evaluating on validation sample...")
     from src.model import predict_matches
-    # Evaluate on a 5000 S1 entity subset to keep it fast
-    val_s1_sample = list(s1_records.keys())[:min(5000, len(s1_records))]
+    from src.evaluate import country_breakdown_evaluation
+    # Evaluate on a 6000 S1 entity subset to keep it fast
+    val_s1_sample = list(s1_records.keys())[:min(6000, len(s1_records))]
     val_s1_set = set(val_s1_sample)
     val_pairs = [(s1, c) for s1, c in pair_ids if s1 in val_s1_set]
     val_gt = {s1: ground_truth.get(s1, set()) for s1 in val_s1_set}
+    val_countries = {s1: s1_records[s1].get("country", "Unknown") for s1 in val_s1_set}
 
     if val_pairs:
         val_indices = [i for i, (s1, _) in enumerate(pair_ids) if s1 in val_s1_set]
         val_X = X[val_indices]
         predictions = predict_matches(model, val_X, val_pairs, threshold, val_s1_set)
         eval_results = detailed_evaluation(predictions, val_gt, beta=0.5)
-        logger.info(f"Validation F_0.5: {eval_results['macro_f_beta']:.4f}")
+        logger.info(f"Validation F_0.5 Overall: {eval_results['macro_f_beta']:.4f}")
         for k, v in eval_results.items():
             logger.info(f"  {k}: {v}")
+
+        # Per-country breakdown
+        country_results = country_breakdown_evaluation(predictions, val_gt, val_countries, beta=0.5)
+        logger.info("Validation F_0.5 by Country:")
+        for country, c_res in country_results.items():
+            logger.info(f"  [{country}] Macro F_0.5: {c_res['macro_f_beta']:.4f}, Precision: {c_res['precision_avg']:.4f}, Recall: {c_res['recall_avg']:.4f} (N={c_res['total_entities']:,})")
 
     logger.info(f"Training complete in {time.time() - t0:.1f}s")
 

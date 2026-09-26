@@ -16,6 +16,7 @@ __all__ = [
     "macro_f_beta",
     "detailed_evaluation",
     "print_detailed_report",
+    "country_breakdown_evaluation",
 ]
 
 
@@ -282,3 +283,36 @@ def print_detailed_report(report: Dict[str, Any]) -> None:
     print(f"  Average precision:        {p_avg:.4f}")
     print(f"  Average recall:           {r_avg:.4f}")
     print("=" * 60)
+
+
+def country_breakdown_evaluation(
+    predictions: Dict,
+    ground_truth: Dict,
+    entity_countries: Dict[str, str],
+    beta: float = 0.5,
+) -> Dict[str, Dict[str, Any]]:
+    """Compute detailed evaluation broken down per country.
+
+    Args:
+        predictions: Dict mapping {s1_id: set_of_predicted_ids}.
+        ground_truth: Dict mapping {s1_id: set_of_true_ids}.
+        entity_countries: Dict mapping {s1_id: country_string}.
+        beta: Beta parameter (default: 0.5).
+
+    Returns:
+        Dict mapping country -> detailed evaluation dict.
+    """
+    by_country: Dict[str, Dict[str, Set]] = {}
+    for s1_id, true_val in ground_truth.items():
+        country = entity_countries.get(s1_id, "Unknown")
+        if country not in by_country:
+            by_country[country] = {}
+        by_country[country][s1_id] = true_val
+
+    results = {}
+    for country, country_gt in sorted(by_country.items()):
+        country_preds = {s1: predictions.get(s1, set()) for s1 in country_gt}
+        res = detailed_evaluation(country_preds, country_gt, beta=beta)
+        results[country] = res
+
+    return results
