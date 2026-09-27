@@ -59,8 +59,41 @@ class Config:
     # Number of character n-gram shingles for fallback blocking
     shingle_size: int = 4
 
+    # ── Disambiguation & Generic Words ──────────────────────────
+    # High-frequency generic business/organization terms and grammatical stopwords
+    # used to identify distinctive vs generic tokens across French, English, and Indian names.
+    generic_words: set = field(default_factory=lambda: {
+        # French stopwords and organization types
+        "de", "du", "des", "la", "le", "les", "et", "en", "au", "aux", "d", "l", "un", "une",
+        "saint", "sainte", "ste", "st", "sur", "sous", "dans", "par", "pour", "avec",
+        "ecole", "amicale", "ferme", "maternelle", "primaire", "secondaire", "college", "lycee",
+        "centre", "center", "club", "association", "comite", "societe", "maison", "groupe",
+        "cie", "ets", "etablissement", "etablissements", "service", "services", "entreprise", "entreprises",
+        "commune", "ville", "institut", "bordeaux", "paris", "lyon", "marseille", "france", "fr", "fils", "freres",
+        "hospitalier", "hopital", "medical", "sante", "sanitaire", "enseignement", "culturel", "culturelle",
+        # All legal entity types (French, US, Indian, International)
+        "sa", "sas", "sarl", "sasu", "eurl", "sci", "gmbh", "ag", "srl", "sl", "bv", "nv", "pty", "pte", "plc",
+        "inc", "incorporated", "corp", "corporation", "co", "company", "llc", "llp", "lp", "ltd", "limited",
+        "pvt", "private", "dba",
+        # English / US stopwords and corporate descriptors
+        "and", "the", "of", "in", "for", "at", "by", "on", "with", "to", "from", "a", "an",
+        "associates", "partners", "group", "holdings", "services", "solutions", "technologies",
+        "enterprises", "industries", "management", "consulting", "consultants", "consultancy",
+        "ventures", "capital", "trust", "foundation", "international", "global", "national",
+        "care", "health", "healthcare", "medical", "medicine", "clinic", "systems", "products", "trading", "developers",
+        # Indian corporate descriptors and honorifics
+        "india", "shree", "sri", "om", "brothers", "sons", "tech",
+        "agro", "engineering", "producer", "marketing", "traders", "finance", "logistics",
+        "properties", "apex", "prime", "premier", "dynamic", "bright", "golden", "green",
+        "blue", "first", "smart", "creative", "food", "foods", "construction", "media",
+    })
+
+    # Hard veto thresholds
+    veto_distinctive_mismatch_max_sort: float = 0.82
+    veto_prefix_suffix_conflict_max_sort: float = 0.75
+
     # ── Features ────────────────────────────────────────────────
-    # (Nothing to configure externally; feature set is fixed)
+    # (Feature names and extraction logic in src.features)
 
     # ── Model ───────────────────────────────────────────────────
     # LightGBM parameters

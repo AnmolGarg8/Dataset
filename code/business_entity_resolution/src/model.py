@@ -71,15 +71,25 @@ def train_model(
     # ── Feature importance ─────────────────────────────────────
     importances = model.feature_importances_
     sorted_idx = np.argsort(importances)[::-1]
-    logger.info("Top 10 features:")
-    for i in sorted_idx[:10]:
+    logger.info("Top 15 features:")
+    for i in sorted_idx[:15]:
         logger.info(f"  {FEATURE_NAMES[i]}: {importances[i]}")
+
+    # Check importance of disambiguation features
+    disambig_feats = [
+        "distinctive_token_mismatch", "distinctive_token_overlap_ratio",
+        "name_minus_common_prefix_similarity", "name_prefix_suffix_conflict"
+    ]
+    for fn in disambig_feats:
+        if fn in FEATURE_NAMES:
+            idx = FEATURE_NAMES.index(fn)
+            logger.info(f"  [Disambiguation Feature] {fn}: {importances[idx]}")
 
     # ── Threshold tuning on held-out entities ───────────────────
     if X_val is not None and val_pair_ids is not None and val_ground_truth is not None:
         val_probs = model.predict_proba(X_val)[:, 1]
         best_threshold = _tune_threshold(
-            val_probs, val_pair_ids, val_ground_truth, all_s1_ids=val_s1_ids
+            val_probs, val_pair_ids, val_ground_truth, all_s1_ids=val_s1_ids, X=X_val
         )
     elif fixed_threshold is not None:
         best_threshold = fixed_threshold
@@ -90,11 +100,35 @@ def train_model(
     return model, best_threshold
 
 
+def _apply_hard_veto(probs: np.ndarray, X: np.ndarray) -> np.ndarray:
+    """Zero out predicted probability for candidate pairs violating disambiguation constraints.
+
+    1. Distinctive token mismatch: both names have distinctive tokens but ZERO overlap,
+       and overall name_token_sort_ratio < veto_distinctive_mismatch_max_sort (0.65).
+    2. Shared-prefix / sister-company conflict: share a common brand/family name prefix
+       but have conflicting suffix tokens (suffix similarity < 0.40) and
+       overall name_token_sort_ratio < veto_prefix_suffix_conflict_max_sort (0.70).
+    """
+    if len(X) == 0:
+        return probs
+    probs_clean = probs.copy()
+    # Feature 25: distinctive_token_mismatch, Feature 1: name_token_sort_ratio
+    veto_mismatch = (X[:, 25] == 1.0) & (X[:, 1] < CFG.veto_distinctive_mismatch_max_sort)
+    # Feature 28: name_prefix_suffix_conflict, Feature 1: name_token_sort_ratio
+    veto_prefix = (X[:, 28] == 1.0) & (X[:, 1] < CFG.veto_prefix_suffix_conflict_max_sort)
+
+    veto_total = veto_mismatch | veto_prefix
+    if np.any(veto_total):
+        probs_clean[veto_total] = 0.0
+    return probs_clean
+
+
 def _tune_threshold(
     probs: np.ndarray,
     pair_ids: List[Tuple[str, str]],
     ground_truth: Dict[str, Set[str]],
     all_s1_ids: Optional[Set[str]] = None,
+    X: Optional[np.ndarray] = None,
     max_rank: int = 8,
     margin: float = 0.15,
 ) -> float:
@@ -105,6 +139,9 @@ def _tune_threshold(
     entities with 0 candidates).
     """
     from collections import defaultdict
+
+    if X is not None:
+        probs = _apply_hard_veto(probs, X)
 
     s1_eval_ids = set(all_s1_ids) if all_s1_ids is not None else {s1_id for s1_id, _ in pair_ids}
 
@@ -176,7 +213,9 @@ def predict_matches(
     for i in range(n_batches):
         start = i * batch_size
         end = min(start + batch_size, len(X))
-        probs = model.predict_proba(X[start:end])[:, 1]
+        batch_X = X[start:end]
+        probs = model.predict_proba(batch_X)[:, 1]
+        probs = _apply_hard_veto(probs, batch_X)
 
         for j, prob in enumerate(probs):
             if prob >= threshold:

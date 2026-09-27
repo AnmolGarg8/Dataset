@@ -16,6 +16,8 @@ import pandas as pd
 from rapidfuzz import fuzz
 from rapidfuzz.distance import Levenshtein, JaroWinkler
 
+from .config import CFG
+
 logger = logging.getLogger(__name__)
 
 
@@ -62,6 +64,99 @@ def _containment(a: set, b: set) -> float:
     return len(a & b) / len(a)
 
 
+def _compute_distinctive_mismatch(
+    s1_name: str,
+    cand_name: str,
+    s1_tokens: list,
+    cand_tokens: list,
+    generic_words: set,
+) -> Tuple[float, float]:
+    """Check whether distinctive non-generic tokens overlap between names.
+
+    Tokenizes directly from the business names to preserve original word order
+    and retain 2-letter distinctive tokens (e.g. 'rj', 'hp', 'ge').
+    Guards substring matching with len >= 5 to prevent short tokens (like 'sa')
+    falsely matching inside other tokens (like 'sas').
+
+    Returns:
+        (distinctive_token_mismatch, distinctive_token_overlap_ratio)
+    """
+    t1 = re.findall(r"[a-z0-9]+", s1_name.lower())
+    t2 = re.findall(r"[a-z0-9]+", cand_name.lower())
+
+    d1 = {t for t in t1 if t not in generic_words and len(t) > 1 and not t.isdigit()}
+    d2 = {t for t in t2 if t not in generic_words and len(t) > 1 and not t.isdigit()}
+
+    if not d1 or not d2:
+        return 0.0, 1.0  # Neutral / cannot determine
+
+    overlap = d1 & d2
+    if overlap:
+        return 0.0, len(overlap) / len(d1 | d2)
+
+    # Check long compound substring (len >= 5) or high fuzzy match
+    s1_lower = s1_name.lower()
+    cand_lower = cand_name.lower()
+    for x in d1:
+        if len(x) >= 5 and x in cand_lower:
+            return 0.0, 0.5
+        for y in d2:
+            if len(y) >= 5 and y in s1_lower:
+                return 0.0, 0.5
+            if JaroWinkler.similarity(x, y) >= 0.88:
+                return 0.0, 0.5
+
+    # Completely disjoint distinctive words
+    return 1.0, 0.0
+
+
+def _compute_prefix_suffix_similarity(
+    s1_name: str,
+    cand_name: str,
+    s1_tokens: list,
+    cand_tokens: list,
+    generic_words: set,
+) -> Tuple[float, float]:
+    """Compute similarity on suffix tokens remaining after common prefix is removed.
+
+    Operates in natural sequence word order. Targets sister companies sharing a brand/family
+    name prefix (e.g., 'Fawn Wilkinson Indonesia' vs 'Fawn Wilkinson Co Services').
+
+    Returns:
+        (name_minus_common_prefix_similarity, name_prefix_suffix_conflict)
+    """
+    t1 = re.findall(r"[a-z0-9]+", s1_name.lower())
+    t2 = re.findall(r"[a-z0-9]+", cand_name.lower())
+
+    i = 0
+    while i < min(len(t1), len(t2)) and t1[i] == t2[i]:
+        i += 1
+    prefix_len = i
+
+    if prefix_len == 0:
+        return 1.0, 0.0  # No common prefix — neutral
+
+    rem1 = t1[prefix_len:]
+    rem2 = t2[prefix_len:]
+
+    if not rem1 and not rem2:
+        return 1.0, 0.0  # Identical after prefix
+
+    if not rem1:
+        if all(t in generic_words for t in rem2):
+            return 1.0, 0.0
+        return 0.0, 1.0
+
+    if not rem2:
+        if all(t in generic_words for t in rem1):
+            return 1.0, 0.0
+        return 0.0, 1.0
+
+    suffix_sim = fuzz.token_set_ratio(" ".join(rem1), " ".join(rem2)) / 100.0
+    conflict = 1.0 if suffix_sim < 0.45 else 0.0
+    return suffix_sim, conflict
+
+
 # ── Feature names (fixed order) ────────────────────────────────────
 
 FEATURE_NAMES = [
@@ -95,6 +190,11 @@ FEATURE_NAMES = [
     "country_match",
     # Script / Normalization Fallback
     "name_dropped_by_normalization",
+    # Disambiguation & Distinctive Token Features
+    "distinctive_token_mismatch",
+    "distinctive_token_overlap_ratio",
+    "name_minus_common_prefix_similarity",
+    "name_prefix_suffix_conflict",
 ]
 
 NUM_FEATURES = len(FEATURE_NAMES)
@@ -202,6 +302,19 @@ def compute_pair_features(
 
     # ── Script / Normalization Fallback ────────────────────────
     feats[24] = 1.0 if (s1_name_dropped or cand_name_dropped) else 0.0
+
+    # ── Disambiguation & Distinctive Token Features ────────────
+    mismatch, overlap_ratio = _compute_distinctive_mismatch(
+        s1_name, cand_name, s1_name_tokens, cand_name_tokens, CFG.generic_words
+    )
+    feats[25] = mismatch
+    feats[26] = overlap_ratio
+
+    suffix_sim, conflict = _compute_prefix_suffix_similarity(
+        s1_name, cand_name, s1_name_tokens, cand_name_tokens, CFG.generic_words
+    )
+    feats[27] = suffix_sim
+    feats[28] = conflict
 
     return feats
 

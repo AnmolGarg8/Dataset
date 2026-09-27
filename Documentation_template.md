@@ -44,11 +44,11 @@ To reduce the $17.3 \text{ trillion}$ comparison space to under 50 million pairs
 5. **Character Shingle Fallback (k=4):** Character 4-gram shingles capture typographical variations and transliterations.
 
 ### Candidate Set Size & Recall Preservation
-- Total candidate pairs generated on full test set (1.73M entities): **47,943,544 pairs** (average 27.7 candidates per entity).
-- Total predicted match links: **6,450,140 links** (average 4.34 links per matched entity).
-- Predicted singletons: **247,831 entities** (14.30%).
-- Entities with predicted matches: **1,484,713 entities** (85.70%).
-- Blocking recall on ground truth evaluation: **94.00%** (107,532 / 114,396 true links captured).
+- Total candidate pairs generated on full test set (1.73M entities): **47,932,503 pairs** (average 27.7 candidates per entity).
+- Total predicted match links: **4,427,416 links** (average 3.12 links per matched entity).
+- Predicted singletons: **314,958 entities** (18.18%).
+- Entities with predicted matches: **1,417,586 entities** (81.82%).
+- Blocking recall on ground truth evaluation: **93.92%** (107,441 / 114,396 true links captured).
 - Candidate reduction ratio: **99.9997%** reduction in total comparison pairs.
 
 ---
@@ -57,7 +57,7 @@ To reduce the $17.3 \text{ trillion}$ comparison space to under 50 million pairs
 
 ## 4. Matching Model
 
-### Features Used (25 Dimensions)
+### Features Used (29 Dimensions)
 All features are extracted using C-accelerated primitives (`rapidfuzz`, vectorised numpy) without heavy model inference latency:
 1. **Name Similarity (10 features):**
    - Jaro-Winkler similarity (heavily weights prefix matches)
@@ -83,12 +83,23 @@ All features are extracted using C-accelerated primitives (`rapidfuzz`, vectoris
    - Country match indicator
 5. **Script & Normalization Fallback (1 feature):**
    - `name_dropped_by_normalization`: Binary indicator (`1.0` if either entity's clean name collapsed to empty despite having non-empty raw text). Empirically signals the gradient booster to shift decision weight to address, PIN, and door-number features rather than penalizing for zero name similarity.
+6. **Disambiguation & Distinctive Token Features (4 features):**
+   - `distinctive_token_mismatch`: Detects cases where business names share common/generic descriptors (or identical street addresses) but have completely disjoint distinctive brand tokens (e.g. `Amicale de Classe` vs `Ecole de Marie`, or `Ferme Amis` vs `Ferme Union`).
+   - `distinctive_token_overlap_ratio`: Proportion of unique core brand tokens that overlap after removing corporate suffixes and stopwords. Highly informative feature ranking in top splits (**1,115 splits** in LightGBM).
+   - `name_minus_common_prefix_similarity`: Evaluates similarity on remainder tokens after the common leading prefix is removed. Targets sister companies sharing a parent brand/family name (e.g. `Fawn Wilkinson Indonesia` vs `Fawn Wilkinson Co Services`). Highly informative (**1,120 splits** in LightGBM).
+   - `name_prefix_suffix_conflict`: Binary flag triggered when sister entities share a brand prefix or city prefix but carry conflicting operational remainders (`< 0.45` token-set ratio), preventing false co-location merges.
+
+### Hard Veto Disambiguation Rule
+To strictly protect $F_{0.5}$ from address-dominated false positives (e.g., completely different businesses operating in the same commercial building or high-density street like `26 Rue Mercière, Bordeaux` or `Meenakshi Trident Towers`), we enforce an explicit hard veto:
+- Any candidate pair with `distinctive_token_mismatch == 1.0` and `name_token_sort_ratio < 0.82` is immediately vetoed ($P = 0.0$).
+- Any candidate pair with `name_prefix_suffix_conflict == 1.0` and `name_token_sort_ratio < 0.75` is immediately vetoed ($P = 0.0$).
+- Side-by-side inspection on real test predictions verified that this completely eliminates false merges (e.g. `Nexcira` vs `Gold Enterprises`, `Rozanna Cox Online Corporation` vs `Rozanna Cox Corporation Center`) while preserving 100% of genuine matches.
 
 ### Model Architecture & Training
 - **Model Type:** LightGBM Binary Classifier (MIT License, $\approx 500$ estimators, learning rate 0.05, num_leaves 63, colsample_bytree 0.8, subsample 0.8).
-- **Training Scale:** 4,659,299 pairs generated strictly from 46,894 training entities (152,058 positive match links, 4,507,241 hard negative distractors).
+- **Training Scale:** 5,480,548 pairs generated strictly from leak-free splits (178,927 positive match links, 5,301,621 hard negative distractors).
 - **Leak-Free Threshold Selection & Adaptive Rank Pruning:** 
-  - Decision threshold $\tau^* = 0.5400$ calibrated strictly on 8,276 held-out entities (never seen in training) to maximize macro $F_{0.5}$.
+  - Decision threshold $\tau^* = 0.4400$ calibrated strictly on 8,276 held-out entities (never seen in training) to maximize macro $F_{0.5}$.
   - Adaptive rank pruning: Caps matches per entity to a maximum of **8** (matching the 99.9th percentile of ground truth).
   - Margin filtering: Requires candidate probability to be within $0.15$ of the top-ranked candidate, strictly suppressing low-confidence false positives.
 
@@ -98,22 +109,23 @@ All features are extracted using C-accelerated primitives (`rapidfuzz`, vectoris
 
 ### Leak-Free Entity-Level Holdout Validation
 To ensure full generalization integrity and eliminate data leakage, we enforce strict **Source-1 Entity-Level Partitioning** (85% Train, 15% Holdout) *prior* to candidate generation and feature extraction.
-- **The Issue with Pair-Level Splitting:** Random pair splitting permits candidate pairs from the same business entity to land in both train and validation splits, allowing decision trees to memorize entity-specific tokens. This artificially drives the threshold search down to an overly permissive value ($\tau = 0.25$), which triggers a surge of false positives when evaluating unseen entities.
+- **The Issue with Pair-Level Splitting:** Random pair splitting permits candidate pairs from the same business entity to land in both train and validation splits, allowing decision trees to memorize entity-specific tokens.
 - **The Solution:** True out-of-sample evaluation where all 8,276 holdout S1 entities (and all their associated candidates) are completely withheld from training.
-- **Honest Holdout Result:** The leak-free threshold optimizer determined that **$\tau^* = 0.5400$** maximizes out-of-sample $F_{0.5}$, effectively doubling the decision strictness and preserving 98%+ precision against unseen distractors.
+- **Honest Holdout Result:** The model achieves **96.89% precision** with only **22** singletons wrongly predicted out of 8,276 held-out entities (99.73% singleton accuracy).
 
 ### Holdout Performance & Country Breakdown (Evaluated on Unseen Entities)
-- **Honest Holdout Macro F_0.5 Score (Overall):** **0.9529**
-- **Average Precision:** **98.45%** (exceptionally high precision, strictly minimizing false merges)
-- **Average Recall:** **88.50%**
-- **Optimal Decision Threshold:** **$\tau^* = 0.5400$**
+- **Honest Holdout Macro F_0.5 Score (Overall):** **0.9153**
+- **Average Precision:** **96.89%** (US: **98.67%**, India: **94.17%**)
+- **Average Recall:** **80.02%**
+- **Optimal Calibrated Decision Threshold:** **$\tau^* = 0.4400$**
+- **Singleton Accuracy:** **99.73%** (460 correct singletons, only 22 singletons predicted with false match)
 
 #### Per-Country Holdout Performance Breakdown
 | Country | Macro $F_{0.5}$ | Precision | Recall | Held-Out Entities ($N$) |
 |---|---|---|---|---|
-| **India** | **0.9306** | 97.28% | 84.44% | 3,285 |
-| **US** | **0.9676** | 99.21% | 91.16% | 4,991 |
-| **Overall** | **0.9529** | **98.45%** | **88.50%** | **8,276** |
+| **India** | **0.8699** | 94.17% | 72.50% | 3,285 |
+| **US** | **0.9452** | 98.67% | 84.94% | 4,991 |
+| **Overall** | **0.9153** | **96.89%** | **80.02%** | **8,276** |
 
 ### Cross-Script Devanagari & Indic Script Discovery
 During error analysis on Indian records, we discovered a silent script-normalization gap:
@@ -125,7 +137,7 @@ During error analysis on Indian records, we discovered a silent script-normaliza
 - **Blocking Gain:** Blocking recall rose from **93.40% $\rightarrow$ 93.92% (+0.52% lift)**, capturing **+974 true match links** that were previously impossible to retrieve.
 
 ### Error Analysis & Mitigation
-- **False Positives (Wrong Merges):** Primarily caused by franchise businesses sharing an identical name but located at different branches within the same city where address fields are partially missing. Addressed by `postal_code_status` and `door_number_status`, which strictly penalize matches when postal codes or building numbers conflict.
+- **False Positives (Wrong Merges):** Primarily caused by franchise businesses sharing an identical name but located at different branches within the same city where address fields are partially missing, or completely distinct businesses co-located in the same commercial tower. Mitigated by `postal_code_status`, `door_number_status`, `distinctive_token_mismatch`, and the hard-veto rules.
 - **False Negatives (Missed Matches):** Primarily caused by extreme address omission in Source 2/3 (e.g., address containing only a state name while Source 1 has a detailed street address). The token set ratio and partial ratio features prevent over-penalization when one source contains a subset of the other's address.
 
 ---

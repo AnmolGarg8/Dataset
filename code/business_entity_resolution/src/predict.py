@@ -30,7 +30,7 @@ from src.config import CFG
 from src.preprocessing import preprocess_dataframe
 from src.blocking import generate_candidates
 from src.features import extract_features_batch, df_to_record_dict
-from src.model import load_model
+from src.model import load_model, _apply_hard_veto
 from src.utils import (
     setup_logging, ensure_dir,
     write_matching_results, write_candidate_pairs,
@@ -79,6 +79,7 @@ def score_country_candidates(
         pair_ids, X = extract_features_batch(s1_records, pool_records, batch_cands)
         if len(X) > 0:
             probs = model.predict_proba(X)[:, 1]
+            probs = _apply_hard_veto(probs, X)
             from collections import defaultdict
             batch_entity_scores = defaultdict(list)
             for (s1_id, cand_id), prob in zip(pair_ids, probs):
